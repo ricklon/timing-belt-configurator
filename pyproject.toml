@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "timing-belt-configurator"
+version = "0.1.0"
+description = "Customizable timing belt generator"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [
+    { include = "timing_belt" }
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.13"
+streamlit = "^1.41.0"
+cadquery = "^2.3.1"
+cadquery-ocp = "^7.7.0"
+numpy = ">=1.24.0,<2.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
