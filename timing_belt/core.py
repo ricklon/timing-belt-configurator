@@ -1,160 +1,143 @@
-import cadquery as cq
+"""Core functionality for generating timing belts."""
+from dataclasses import dataclass
+import numpy as np
+from typing import List, Tuple
 import math
-from dataclasses import dataclass, field
-from typing import List, Tuple, Optional
+import cadquery as cq
 
-@dataclass
-class S3MTimingBelt:
-    """
-    Class for generating S3M timing belts.
-    
-    You must specify either:
-      - length_mm (total belt length in millimeters) OR 
-      - num_teeth (number of teeth on the belt)
-    
-    The other parameter will be computed assuming an S3M belt
-    where the pitch (distance between tooth centers) is 3.0 mm.
-    
-    Attributes:
-        length_mm (Optional[float]): Total belt length in millimeters.
-        num_teeth (Optional[int]): Number of teeth on the belt.
-        width (float): Width of the belt in millimeters (default is 4.0 mm).
-        scale_factor (float): Scale factor for material shrinkage (default 1.0 = 100%).
-    """
-    length_mm: Optional[float] = None
-    num_teeth: Optional[int] = None
-    width: float = 4.0
-    scale_factor: float = 1.0
-
-    # S3M Standard Parameters (all in mm)
-    PITCH: float = 3.0
-    BELT_THICKNESS: float = 2.3  # thickness of the belt body
-    TOOTH_HEIGHT: float = 1.4    # depth of the tooth void
-    TOOTH_TOP_WIDTH: float = 1.5   # width at the void tip (inner-most part)
-    TOOTH_BOTTOM_WIDTH: float = 2.2  # width at the belt inner surface
-
-    def __post_init__(self):
-        if self.length_mm is None and self.num_teeth is None:
-            raise ValueError("You must specify either length_mm or num_teeth.")
-        if self.length_mm is not None and self.num_teeth is not None:
-            raise ValueError("Specify either length_mm or num_teeth, not both.")
-        # Compute the missing parameter so that length_mm == num_teeth * PITCH.
-        if self.length_mm is None:
-            self.length_mm = self.num_teeth * self.PITCH
-        else:
-            # Compute ideal number of teeth.
-            computed_teeth = self.length_mm / self.PITCH
-            # Round to the nearest integer.
-            self.num_teeth = round(computed_teeth)
-            # Optionally adjust length_mm so that it's exactly consistent:
-            self.length_mm = self.num_teeth * self.PITCH
-
-    @property
-    def pitch_radius(self) -> float:
-        """
-        Calculate the belt's pitch radius assuming the belt forms a full circle.
-        """
-        return self.length_mm / (2 * math.pi)
-
-    @property
-    def inner_surface_radius(self) -> float:
-        """
-        The working (toothed) surface is on the inner side.
-        """
-        return self.pitch_radius - self.BELT_THICKNESS
-
-    def _generate_tooth_profile(self) -> List[Tuple[float, float]]:
-        """
-        Generate the points for a single tooth void profile.
-        
-        The void is defined as a trapezoid starting at the belt's inner surface
-        and extending inward (toward the belt center) by TOOTH_HEIGHT.
-        """
-        base = self.inner_surface_radius  # starting at the belt's inner surface
-        return [
-            (base, -self.TOOTH_BOTTOM_WIDTH / 2),                        # bottom left
-            (base - self.TOOTH_HEIGHT, -self.TOOTH_TOP_WIDTH / 2),         # top left
-            (base - self.TOOTH_HEIGHT,  self.TOOTH_TOP_WIDTH / 2),         # top right
-            (base,  self.TOOTH_BOTTOM_WIDTH / 2)                           # bottom right
-        ]
-
-    def generate_model(self) -> cq.Workplane:
-        """
-        Generate the complete belt model.
-        
-        The belt is modeled as an annular ring (a donut) representing the belt body.
-        The tooth voids are subtracted from the inner surface of the belt.
-        """
-        # Define the belt body as an annulus.
-        outer_radius = self.pitch_radius
-        inner_radius = outer_radius - self.BELT_THICKNESS
-        
-        belt = (
-            cq.Workplane("XY")
-            .circle(outer_radius)
-            .circle(inner_radius)
-            .extrude(self.width)
-        )
-
-        # Generate tooth voids.
-        tooth_profile = self._generate_tooth_profile()
-        tooth_angle = 360.0 / self.num_teeth
-
-        for i in range(self.num_teeth):
-            angle = i * tooth_angle
-            tooth_void = (
-                cq.Workplane("XY")
-                .transformed(rotate=(0, 0, angle))
-                .polyline(tooth_profile)
-                .close()
-                .extrude(self.width)
-            )
-            belt = belt.cut(tooth_void)
-
-        # Apply scaling if needed.
-        if self.scale_factor != 1.0:
-            scaled_shape = belt.val().scale(self.scale_factor)
-            belt = cq.Workplane("XY").add(scaled_shape)
-
-        return belt
-
-    def export_stl(self, filepath: str) -> None:
-        """
-        Export the belt model to an STL file.
-        
-        Args:
-            filepath (str): Path where the STL file should be saved.
-        """
-        model = self.generate_model()
-        cq.exporters.export(model, filepath)
-        
-    def export_step(self, filepath: str) -> None:
-        """
-        Export the belt model to a STEP file.
-        
-        Args:
-            filepath (str): Path where the STEP file should be saved.
-        """
-        model = self.generate_model()
-        cq.exporters.export(model, filepath, 'STEP')
-
-# Example usage:
-# If you want to specify by number of teeth:
-belt_by_teeth = S3MTimingBelt(num_teeth=70)
-print(f"Length from num_teeth: {belt_by_teeth.length_mm} mm")
-
-# If you want to specify by total length:
-belt_by_length = S3MTimingBelt(length_mm=210)
-print(f"Teeth from length_mm: {belt_by_length.num_teeth}")
-
-# Recommended print settings (for reference)
+# Print settings for TPU belts
 PRINT_SETTINGS = {
     "material": "TPU 95A",
-    "layer_height": 0.1,  # mm
-    "infill": 100,        # percent
-    "print_speed": 25,    # mm/s
-    "temperature": 225,   # °C
-    "bed_temperature": 55,  # °C
-    "fan_speed": 50,      # percent
-    "retraction_enabled": False
+    "layer_height": "0.2mm",
+    "infill": "100%",
+    "wall_thickness": "1.2mm",
+    "print_temperature": "230°C",
+    "bed_temperature": "45°C",
+    "print_speed": "25mm/s",
+    "retraction_speed": "25mm/s",
+    "retraction_distance": "1mm",
+    "fan_speed": "50%"
 }
+
+@dataclass
+class ToothProfile:
+    """S3M timing belt tooth profile parameters"""
+    pitch: float = 3.0  # mm
+    tooth_height: float = 1.4  # mm
+    tooth_width_at_base: float = 2.0  # mm
+    tooth_radius: float = 0.6  # mm
+    belt_thickness: float = 2.0  # mm
+
+class S3MTimingBelt:
+    """Generator for S3M timing belts"""
+    
+    def __init__(self, length_mm: float = None, num_teeth: int = None, width: float = 9.0, scale_factor: float = 1.005):
+        """Initialize belt parameters"""
+        self.profile = ToothProfile()
+        
+        # Set length and teeth based on input
+        if length_mm is not None:
+            self.length_mm = length_mm
+            self.num_teeth = round(length_mm / self.profile.pitch)
+        elif num_teeth is not None:
+            self.num_teeth = num_teeth
+            self.length_mm = num_teeth * self.profile.pitch
+        else:
+            raise ValueError("Either length_mm or num_teeth must be provided")
+            
+        self.width = width
+        self.scale_factor = scale_factor
+        
+        # Calculate pitch radius from length
+        self.pitch_radius = self.length_mm / (2 * math.pi)
+        
+        # Validate inputs
+        if self.num_teeth < 10:
+            raise ValueError("Number of teeth must be at least 10")
+        if width < 3.0:
+            raise ValueError("Belt width must be at least 3mm")
+
+    def _create_single_tooth(self, debug=False) -> cq.Workplane:
+        """Create a single tooth solid with improved placement"""
+        # Calculate positions
+        inner_radius = self.pitch_radius - self.profile.belt_thickness
+        tooth_width = self.profile.tooth_width_at_base
+        tooth_tip_width = tooth_width * 0.8
+        
+        # Add extra depth to ensure complete cut through inner circle
+        extra_depth = 1.0  # Add 1mm extra depth to ensure complete cut
+        
+        # Points for tooth profile (counter-clockwise from bottom left)
+        points = [
+            (-tooth_width/2, inner_radius - extra_depth),  # Extended bottom left
+            (-tooth_tip_width/2, inner_radius + self.profile.tooth_height),  # Top left
+            (tooth_tip_width/2, inner_radius + self.profile.tooth_height),   # Top right
+            (tooth_width/2, inner_radius - extra_depth),    # Extended bottom right
+            (-tooth_width/2, inner_radius - extra_depth)    # Back to start
+        ]
+        
+        if debug:
+            print(f"Inner radius: {inner_radius}")
+            print(f"Tooth width at base: {tooth_width}")
+            print(f"Tooth points: {points}")
+        
+        # Create tooth profile and extrude
+        tooth = (cq.Workplane("XY")
+                .polyline(points)
+                .close()
+                .extrude(self.width))
+        
+        return tooth
+
+    def _create_3d_belt(self) -> cq.Workplane:
+        """Create the complete 3D belt model"""
+        try:
+            # Create basic belt body (annulus)
+            belt = (cq.Workplane("XY")
+                   .circle(self.pitch_radius)
+                   .circle(self.pitch_radius - self.profile.belt_thickness)
+                   .extrude(self.width))
+            
+            # Create a single tooth with debug output
+            base_tooth = self._create_single_tooth(debug=True)
+            
+            # Create all teeth by rotating and combining
+            angle = 360.0 / self.num_teeth
+            
+            # Create first tooth
+            teeth = base_tooth
+            
+            # Add remaining teeth
+            for i in range(1, self.num_teeth):
+                # Create rotated copy of tooth
+                rotated = base_tooth.rotate((0,0,0), (0,0,1), i * angle)
+                teeth = teeth.union(rotated)
+            
+            # Cut all teeth from belt body
+            result = belt.cut(teeth)
+            
+            # Apply scaling if needed
+            if self.scale_factor != 1.0:
+                scaled_solid = result.val().scale(self.scale_factor)
+                result = cq.Workplane("XY").add(scaled_solid)
+            
+            return result
+            
+        except Exception as e:
+            raise RuntimeError(f"Failed to create belt geometry: {str(e)}")
+
+    def export_stl(self, filename: str) -> None:
+        """Export the belt as STL file"""
+        try:
+            belt = self._create_3d_belt()
+            cq.exporters.export(belt, filename, 'STL')
+        except Exception as e:
+            raise RuntimeError(f"Failed to export STL: {str(e)}")
+
+    def export_step(self, filename: str) -> None:
+        """Export the belt as STEP file"""
+        try:
+            belt = self._create_3d_belt()
+            cq.exporters.export(belt, filename, 'STEP')
+        except Exception as e:
+            raise RuntimeError(f"Failed to export STEP: {str(e)}")
