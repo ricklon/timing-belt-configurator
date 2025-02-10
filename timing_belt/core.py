@@ -27,6 +27,18 @@ class ToothProfile:
     tooth_width_at_base: float = 2.0  # mm
     tooth_radius: float = 0.6  # mm
     belt_thickness: float = 2.0  # mm
+    extra_depth: float = 1.0  # mm - How far teeth extend past inner radius
+
+    def validate(self):
+        """Validate tooth profile parameters"""
+        if self.tooth_width_at_base <= 0:
+            raise ValueError("Tooth width must be positive")
+        if self.tooth_height <= 0:
+            raise ValueError("Tooth height must be positive")
+        if self.tooth_radius >= self.tooth_width_at_base / 2:
+            raise ValueError("Tooth radius too large for tooth width")
+        if self.belt_thickness < self.tooth_height:
+            raise ValueError("Belt must be thicker than tooth height")
 
 class S3MTimingBelt:
     """Generator for S3M timing belts"""
@@ -34,6 +46,7 @@ class S3MTimingBelt:
     def __init__(self, length_mm: float = None, num_teeth: int = None, width: float = 9.0, scale_factor: float = 1.005):
         """Initialize belt parameters"""
         self.profile = ToothProfile()
+        self.profile.validate()
         
         # Set length and teeth based on input
         if length_mm is not None:
@@ -56,32 +69,26 @@ class S3MTimingBelt:
             raise ValueError("Number of teeth must be at least 10")
         if width < 3.0:
             raise ValueError("Belt width must be at least 3mm")
+        if self.pitch_radius < (self.profile.belt_thickness + self.profile.tooth_height):
+            raise ValueError("Belt radius too small for tooth dimensions")
 
-    def _create_single_tooth(self, debug=False) -> cq.Workplane:
-        """Create a single tooth solid with improved placement"""
+    def _create_single_tooth(self) -> cq.Workplane:
+        """Create a single tooth solid"""
         # Calculate positions
         inner_radius = self.pitch_radius - self.profile.belt_thickness
         tooth_width = self.profile.tooth_width_at_base
         tooth_tip_width = tooth_width * 0.8
         
-        # Add extra depth to ensure complete cut through inner circle
-        extra_depth = 1.0  # Add 1mm extra depth to ensure complete cut
-        
-        # Points for tooth profile (counter-clockwise from bottom left)
+        # Define key points for the tooth profile
         points = [
-            (-tooth_width/2, inner_radius - extra_depth),  # Extended bottom left
+            (-tooth_width/2, inner_radius - self.profile.extra_depth),  # Bottom left
             (-tooth_tip_width/2, inner_radius + self.profile.tooth_height),  # Top left
             (tooth_tip_width/2, inner_radius + self.profile.tooth_height),   # Top right
-            (tooth_width/2, inner_radius - extra_depth),    # Extended bottom right
-            (-tooth_width/2, inner_radius - extra_depth)    # Back to start
+            (tooth_width/2, inner_radius - self.profile.extra_depth),    # Bottom right
+            (-tooth_width/2, inner_radius - self.profile.extra_depth)    # Back to start
         ]
         
-        if debug:
-            print(f"Inner radius: {inner_radius}")
-            print(f"Tooth width at base: {tooth_width}")
-            print(f"Tooth points: {points}")
-        
-        # Create tooth profile and extrude
+        # Create basic tooth shape
         tooth = (cq.Workplane("XY")
                 .polyline(points)
                 .close()
@@ -98,22 +105,31 @@ class S3MTimingBelt:
                    .circle(self.pitch_radius - self.profile.belt_thickness)
                    .extrude(self.width))
             
-            # Create a single tooth with debug output
-            base_tooth = self._create_single_tooth(debug=True)
+            # Create base tooth
+            base_tooth = self._create_single_tooth()
             
-            # Create all teeth by rotating and combining
+            # Create pattern of teeth in smaller batches
+            batch_size = 10  # Process 10 teeth at a time
             angle = 360.0 / self.num_teeth
+            teeth = None
             
-            # Create first tooth
-            teeth = base_tooth
+            for batch_start in range(0, self.num_teeth, batch_size):
+                batch_teeth = None
+                batch_end = min(batch_start + batch_size, self.num_teeth)
+                
+                for i in range(batch_start, batch_end):
+                    rotated = base_tooth.rotate((0,0,0), (0,0,1), i * angle)
+                    if batch_teeth is None:
+                        batch_teeth = rotated
+                    else:
+                        batch_teeth = batch_teeth.union(rotated)
+                
+                if teeth is None:
+                    teeth = batch_teeth
+                else:
+                    teeth = teeth.union(batch_teeth)
             
-            # Add remaining teeth
-            for i in range(1, self.num_teeth):
-                # Create rotated copy of tooth
-                rotated = base_tooth.rotate((0,0,0), (0,0,1), i * angle)
-                teeth = teeth.union(rotated)
-            
-            # Cut all teeth from belt body
+            # Cut pattern from belt body
             result = belt.cut(teeth)
             
             # Apply scaling if needed
